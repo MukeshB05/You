@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Live Player</title>
+
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/plyr@3.7.8/dist/plyr.css">
+
+<style>
+    html,body{
+        margin:0;
+        padding:0;
+        height:100%;
+        background:#000;
+        overflow:hidden;
+        font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    }
+    #stage, #player{
+        width:100vw;
+        height:100vh;
+    }
+    #stage iframe{ width:100%; height:100%; border:0; display:block; }
+    .plyr{ width:100vw; height:100vh; }
+
+    /* ---------- Top bar: live channels + quality ---------- */
+    #topbar{
+        position:fixed;
+        top:0; left:0; right:0;
+        z-index:50;
+        display:flex;
+        align-items:center;
+        justify-content:space-between;
+        gap:10px;
+        padding:10px 12px;
+        background:linear-gradient(to bottom,rgba(0,0,0,.75),rgba(0,0,0,0));
+        transition:opacity .3s ease;
+    }
+    #topbar.hide{ opacity:0; pointer-events:none; }
+
+    #channels{ display:flex; gap:8px; flex-wrap:wrap; }
+    .ch-btn{
+        border:1px solid rgba(255,255,255,.35);
+        background:rgba(0,0,0,.55);
+        color:#fff;
+        padding:6px 14px;
+        border-radius:999px;
+        font-size:13px;
+        cursor:pointer;
+    }
+    .ch-btn.active{
+        background:#e50914;
+        border-color:#e50914;
+    }
+
+    .q-wrap{ display:flex; align-items:center; gap:6px; color:#fff; font-size:13px; }
+    #quality{
+        background:rgba(0,0,0,.65);
+        color:#fff;
+        border:1px solid rgba(255,255,255,.35);
+        border-radius:6px;
+        padding:6px 8px;
+        font-size:13px;
+    }
+</style>
+</head>
+<body>
+
+<div id="topbar">
+    <div id="channels"></div>
+    <label class="q-wrap">Quality
+        <select id="quality"></select>
+    </label>
+</div>
+
+<div id="stage"><div id="player"></div></div>
+
+<!-- Live channel list (JSON)
+     "id"      = a YouTube video / live video ID
+     "channel" = a channel ID (UC...) -> plays that channel's current live stream -->
+<script id="channel-data" type="application/json">
+[
+    { "name": "Live 1", "id": "9M02G5c6x6w" },
+    { "name": "Live 2", "id": "x1bfKawndzs" },
+    { "name": "Live 3", "id": "nObUcHKZEGY" },
+    { "name": "Live 4", "id": "tgBTspqA5nY" },
+    { "name": "Channel Live", "channel": "UCkA21M22vGK9GtAvq3DvSlA" }
+]
+</script>
+
+<script src="https://cdn.jsdelivr.net/npm/plyr@3.7.8/dist/plyr.polyfilled.min.js"></script>
+
+<script>
+const CHANNELS = JSON.parse(document.getElementById("channel-data").textContent);
+
+/* Quality list: label -> YouTube quality code */
+const QUALITIES = [
+    { label: "Auto",  code: "default" },
+    { label: "1080p", code: "hd1080" },
+    { label: "720p",  code: "hd720" },
+    { label: "480p",  code: "large" },
+    { label: "360p",  code: "medium" },
+    { label: "240p",  code: "small" },
+    { label: "144p",  code: "tiny" }
+];
+
+const urlParams = new URLSearchParams(window.location.search);
+const chParam   = parseInt(urlParams.get("ch"), 10); // ?ch=1..4  (optional)
+
+/* Returns {id} for a video or {channel} for a channel live stream */
+function parseInput(url){
+    if(!url) return null;
+    if(/^[\w-]{11}$/.test(url)) return { id:url };
+    if(/^UC[\w-]{22}$/.test(url)) return { channel:url };
+    try{
+        const u = new URL(url);
+        const ch = u.searchParams.get("channel");          // /embed/live_stream?channel=UC...
+        if(ch) return { channel:ch };
+        const v = u.searchParams.get("v");
+        if(v) return { id:v };
+    }catch(e){}
+    url = url.split("&")[0].split("?si=")[0];
+    const chPath = url.split("/channel/")[1]?.split(/[?/]/)[0];
+    if(chPath) return { channel:chPath };
+    const vid = url.split("youtu.be/")[1]?.split("?")[0] ||
+                url.split("/live/")[1]?.split("?")[0] ||
+                url.split("/embed/")[1]?.split("?")[0] ||
+                url.split("/shorts/")[1]?.split("?")[0];
+    return vid ? { id:vid } : null;
+}
+
+/* ---------- State ---------- */
+let currentIndex = 0;
+let currentQuality = "default";
+try{ currentQuality = localStorage.getItem("yt_quality") || "default"; }catch(e){}
+let plyr = null;      // used for video-ID channels
+let ytApi = null;     // raw YT.Player, used for channel live streams
+const stage = document.getElementById("stage");
+
+/* ---------- UI: channels ---------- */
+const chBox = document.getElementById("channels");
+function addButton(c, i){
+    const b = document.createElement("button");
+    b.className = "ch-btn";
+    b.textContent = c.name;
+    b.onclick = () => loadChannel(i);
+    chBox.appendChild(b);
+}
+CHANNELS.forEach(addButton);
+
+function markActive(){
+    [...chBox.children].forEach((b, i) =>
+        b.classList.toggle("active", i === currentIndex));
+}
+
+/* ---------- UI: quality ---------- */
+const qSel = document.getElementById("quality");
+QUALITIES.forEach(q => {
+    const o = document.createElement("option");
+    o.value = q.code;
+    o.textContent = q.label;
+    qSel.appendChild(o);
+});
+qSel.value = currentQuality;
+qSel.onchange = () => {
+    currentQuality = qSel.value;
+    try{ localStorage.setItem("yt_quality", currentQuality); }catch(e){}
+    applyQuality();
+};
+
+function applyQuality(){
+    const yt = ytApi || (plyr && plyr.embed);
+    if(!yt) return;
+    try{
+        if(yt.setPlaybackQualityRange){
+            currentQuality === "default"
+                ? yt.setPlaybackQualityRange("tiny","highres")
+                : yt.setPlaybackQualityRange(currentQuality, currentQuality);
+        }
+        yt.setPlaybackQuality && yt.setPlaybackQuality(currentQuality);
+    }catch(e){ console.warn("Quality change failed", e); }
+}
+
+/* ---------- YouTube iframe API (for channel live streams) ---------- */
+let ytApiReady = null;
+function loadYTApi(){
+    if(ytApiReady) return ytApiReady;
+    ytApiReady = new Promise(resolve => {
+        if(window.YT && YT.Player) return resolve();
+        window.onYouTubeIframeAPIReady = resolve;
+        const t = document.createElement("script");
+        t.src = "https://www.youtube.com/iframe_api";
+        document.head.appendChild(t);
+    });
+    return ytApiReady;
+}
+
+/* ---------- Player builders ---------- */
+function resetStage(){
+    try{ plyr && plyr.destroy(); }catch(e){}
+    try{ ytApi && ytApi.destroy && ytApi.destroy(); }catch(e){}
+    plyr = null; ytApi = null;
+    stage.innerHTML = "";
+}
+
+function createVideoPlayer(videoID){
+    stage.innerHTML = '<div id="player"></div>';
+    const el = document.querySelector("#player");
+    el.setAttribute("data-plyr-provider","youtube");
+    el.setAttribute("data-plyr-embed-id",videoID);
+
+    plyr = new Plyr('#player',{
+        autoplay:true,
+        muted:true,
+        clickToPlay:false,
+        controls:['play','progress','current-time','mute','volume','pip','airplay','fullscreen'],
+        youtube:{
+            noCookie:true,
+            params:{ modestbranding:1, rel:0, iv_load_policy:3, playsinline:1 }
+        }
+    });
+    plyr.on("ready",   applyQuality);
+    plyr.on("playing", applyQuality);
+}
+
+function createChannelPlayer(channelID){
+    const f = document.createElement("iframe");
+    f.id = "yt-live";
+    f.allow = "autoplay; encrypted-media; picture-in-picture; fullscreen";
+    f.allowFullscreen = true;
+    f.src = "https://www.youtube-nocookie.com/embed/live_stream?channel=" +
+            encodeURIComponent(channelID) +
+            "&autoplay=1&mute=1&playsinline=1&rel=0&modestbranding=1&enablejsapi=1" +
+            "&origin=" + encodeURIComponent(location.origin);
+    stage.appendChild(f);
+
+    loadYTApi().then(() => {
+        ytApi = new YT.Player("yt-live", {
+            events:{
+                onReady: applyQuality,
+                onStateChange: e => { if(e.data === 1) applyQuality(); }
+            }
+        });
+    });
+}
+
+function loadChannel(i){
+    currentIndex = i;
+    markActive();
+    const c = CHANNELS[i];
+    resetStage();
+    c.channel ? createChannelPlayer(c.channel) : createVideoPlayer(c.id);
+}
+
+/* ---------- Start ---------- */
+const custom = parseInput(urlParams.get("url"));
+if(custom){
+    // ?url= link given -> add it as an extra channel and play it
+    CHANNELS.push({ name:"Custom", ...custom });
+    addButton(CHANNELS[CHANNELS.length-1], CHANNELS.length-1);
+    loadChannel(CHANNELS.length-1);
+}else{
+    const start = (chParam >= 1 && chParam <= CHANNELS.length) ? chParam - 1 : 0;
+    loadChannel(start);
+}
+
+/* ---------- Auto-hide top bar ---------- */
+const topbar = document.getElementById("topbar");
+let hideTimer;
+function showBar(){
+    topbar.classList.remove("hide");
+    clearTimeout(hideTimer);
+    hideTimer = setTimeout(() => topbar.classList.add("hide"), 4000);
+}
+["mousemove","touchstart","keydown","click"].forEach(ev =>
+    document.addEventListener(ev, showBar, { passive:true }));
+showBar();
+</script>
+
+</body>
+</html>
